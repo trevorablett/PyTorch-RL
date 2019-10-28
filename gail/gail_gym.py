@@ -8,10 +8,14 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from utils import *
 from models.mlp_policy import Policy
+from models.cnn_policy import CNNPolicy
 from models.mlp_critic import Value
+from models.cnn_critic import CNNValue
 from models.mlp_policy_disc import DiscretePolicy
 from models.mlp_discriminator import Discriminator
+from models.cnn_discriminator import CNNDiscriminator
 from torch import nn
+from torchvision import transforms
 from core.ppo import ppo_step
 from core.common import estimate_advantages
 from core.agent import Agent
@@ -57,12 +61,26 @@ device = torch.device('cuda', index=args.gpu_index) if torch.cuda.is_available()
 if torch.cuda.is_available():
     torch.cuda.set_device(args.gpu_index)
 
+"""CNN options (hardcoded for now for simplicity)"""
+cnn_options = dict(
+    channels = [64, 32, 32],
+    kernel_sizes = [7, 4, 3],
+    strides = [4, 2, 1],
+    head_hidden_sizes = [512]
+)
+
 """environment"""
 env = gym.make(args.env_name)
-state_dim = env.observation_space.shape[0]
+# todo no policy for image state and discrete action
+is_img_state = len(env.observation_space.shape) == 3
+if not is_img_state:
+    state_dim = env.observation_space.shape[0]
+    running_state = ZFilter((state_dim,), clip=5)
+else:
+    state_dim = env.observation_space.shape
+    running_state = ZFilter(state_dim, clip=5)
 is_disc_action = len(env.action_space.shape) == 0
 action_dim = 1 if is_disc_action else env.action_space.shape[0]
-running_state = ZFilter((state_dim,), clip=5)
 # running_reward = ZFilter((1,), demean=False, clip=10)
 
 """seeding"""
@@ -71,12 +89,34 @@ torch.manual_seed(args.seed)
 env.seed(args.seed)
 
 """define actor and critic"""
+if args.env_name == 'CarRacing-v0':
+    num_aux = 1
+else:
+    num_aux = 0
+
 if is_disc_action:
     policy_net = DiscretePolicy(state_dim, env.action_space.n)
+elif is_img_state:
+    policy_net = CNNPolicy(state_dim, env.action_space.shape[0], cnn_options['channels'],
+                           cnn_options['kernel_sizes'], cnn_options['strides'],
+                           head_hidden_size=cnn_options['head_hidden_sizes'],
+                           num_aux=num_aux, log_std=args.log_std)
 else:
     policy_net = Policy(state_dim, env.action_space.shape[0], log_std=args.log_std)
-value_net = Value(state_dim)
-discrim_net = Discriminator(state_dim + action_dim)
+
+if is_img_state:
+    value_net = CNNValue(state_dim, cnn_options['channels'],
+                           cnn_options['kernel_sizes'], cnn_options['strides'],
+                           head_hidden_size=cnn_options['head_hidden_sizes'],
+                           num_aux=num_aux)
+    discrim_net = CNNDiscriminator(state_dim, action_dim, cnn_options['channels'],
+                           cnn_options['kernel_sizes'], cnn_options['strides'],
+                           head_hidden_size=cnn_options['head_hidden_sizes'],
+                           num_aux=num_aux)
+else:
+    value_net = Value(state_dim)
+    discrim_net = Discriminator(state_dim + action_dim)
+
 discrim_criterion = nn.BCELoss()
 to_device(device, policy_net, value_net, discrim_net, discrim_criterion)
 
@@ -87,6 +127,10 @@ optimizer_discrim = torch.optim.Adam(discrim_net.parameters(), lr=args.learning_
 # optimization epoch number and batch size for PPO
 optim_epochs = 10
 optim_batch_size = 64
+
+import ipdb; ipdb.set_trace()
+# TODO next step: ensure that data from expert trajs matches what the expert traj here looks like,
+# or figure out a way to make it work nicely
 
 # load trajectory
 expert_traj, running_state = pickle.load(open(args.expert_traj_path, "rb"))
