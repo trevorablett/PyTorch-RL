@@ -24,8 +24,8 @@ from core.agent import Agent
 parser = argparse.ArgumentParser(description='PyTorch GAIL example')
 parser.add_argument('--env-name', default="Hopper-v2", metavar='G',
                     help='name of the environment to run')
-parser.add_argument('--expert-traj-path', metavar='G',
-                    help='path of the expert trajectories')
+parser.add_argument('--expert-traj-path', default="../assets/expert_traj/Hopper-v2_expert_traj.p",
+                    metavar='G', help='path of the expert trajectories')
 parser.add_argument('--render', action='store_true', default=False,
                     help='render the environment')
 parser.add_argument('--log-std', type=float, default=-1.0, metavar='G',
@@ -55,7 +55,7 @@ parser.add_argument('--save-model-interval', type=int, default=0, metavar='N',
 parser.add_argument('--gpu-index', type=int, default=0, metavar='N')
 args = parser.parse_args()
 
-dtype = torch.float64
+dtype = torch.float32
 torch.set_default_dtype(dtype)
 device = torch.device('cuda', index=args.gpu_index) if torch.cuda.is_available() else torch.device('cpu')
 if torch.cuda.is_available():
@@ -94,6 +94,11 @@ if args.env_name == 'CarRacing-v0':
 else:
     num_aux = 0
 
+if num_aux > 0:
+    aux_running_state = ZFilter(num_aux, clip=5)
+else:
+    aux_running_state = None
+
 if is_disc_action:
     policy_net = DiscretePolicy(state_dim, env.action_space.n)
 elif is_img_state:
@@ -128,13 +133,25 @@ optimizer_discrim = torch.optim.Adam(discrim_net.parameters(), lr=args.learning_
 optim_epochs = 10
 optim_batch_size = 64
 
+# load trajectory
+if is_img_state:
+    expert_data = pickle.load(open(args.expert_traj_path, "rb"))
+    running_state = None
+else:
+    expert_traj, running_state = pickle.load(open(args.expert_traj_path, "rb"))
+# expert_data = pickle.load(open(args.expert_traj_path, "rb"))
+
+# running_state is normally just a z-filter for updating means and std as well as normalization,
+# as an alternative, just normalize states before passing through models
+
+
 import ipdb; ipdb.set_trace()
 # TODO next step: ensure that data from expert trajs matches what the expert traj here looks like,
 # or figure out a way to make it work nicely
 
-# load trajectory
-expert_traj, running_state = pickle.load(open(args.expert_traj_path, "rb"))
+# TODO need to add in aux to discrim and value forward passes (including in expert_reward function)
 
+# TODO need to add in option for pretraining / BC
 
 def expert_reward(state, action):
     state_action = tensor(np.hstack([state, action]), dtype=dtype)
@@ -144,7 +161,8 @@ def expert_reward(state, action):
 
 """create agent"""
 agent = Agent(env, policy_net, device, custom_reward=expert_reward,
-              running_state=running_state, render=args.render, num_threads=args.num_threads)
+              running_state=running_state, render=args.render, num_threads=args.num_threads,
+              aux_running_state=aux_running_state)
 
 
 def update_params(batch, i_iter):
@@ -195,6 +213,8 @@ def main_loop():
         discrim_net.to(torch.device('cpu'))
         batch, log = agent.collect_samples(args.min_batch_size)
         discrim_net.to(device)
+
+        import ipdb; ipdb.set_trace()
 
         t0 = time.time()
         update_params(batch, i_iter)

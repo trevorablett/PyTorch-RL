@@ -1,12 +1,27 @@
 import multiprocessing
+
+from torchvision import transforms
+
 from utils.replay_memory import Memory
 from utils.torch import *
 import math
 import time
 
 
+dtype = torch.float32
+
+# means and stds from imagenet
+img_means = [0.485, 0.456, 0.406]
+img_stds = [0.229, 0.224, 0.225]
+
+img_transform = transforms.Compose((
+    transforms.ToPILImage(),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=img_means, std=img_stds)
+))
+
 def collect_samples(pid, queue, env, policy, custom_reward,
-                    mean_action, render, running_state, min_batch_size):
+                    mean_action, render, running_state, min_batch_size, aux_running_state):
     torch.randn(pid)
     log = dict()
     memory = Memory()
@@ -18,25 +33,51 @@ def collect_samples(pid, queue, env, policy, custom_reward,
     min_c_reward = 1e6
     max_c_reward = -1e6
     num_episodes = 0
+    aux_state = None
+    next_aux_state = None
+    car_racing_env = 'CarRacing' in str(env)
+    is_img_state = len(env.observation_space.shape) == 3
+    if car_racing_env:
+        memory = Memory(include_aux_state=True)
 
     while num_steps < min_batch_size:
         state = env.reset()
+        if car_racing_env:
+            aux_state = np.array([np.linalg.norm(env.car.hull.linearVelocity)])
         if running_state is not None:
             state = running_state(state)
+        if aux_state is not None and aux_running_state is not None:
+            aux_state = aux_running_state(aux_state)
         reward_episode = 0
 
         for t in range(10000):
-            state_var = tensor(state).unsqueeze(0)
+            if is_img_state:
+                state_var = img_transform(state).unsqueeze(0)
+            else:
+                state_var = tensor(state).unsqueeze(0)
+            if aux_state is not None:
+                aux_state_var = tensor(aux_state).view(1, -1).to(dtype)
+
             with torch.no_grad():
                 if mean_action:
-                    action = policy(state_var)[0][0].numpy()
+                    if aux_state is not None:
+                        action = policy(state_var, aux_state_var)[0][0].numpy()
+                    else:
+                        action = policy(state_var)[0][0].numpy()
                 else:
-                    action = policy.select_action(state_var)[0].numpy()
+                    if aux_state is not None:
+                        action = policy.select_action(state_var, aux_state_var)[0].numpy()
+                    else:
+                        action = policy.select_action(state_var)[0].numpy()
             action = int(action) if policy.is_disc_action else action.astype(np.float64)
             next_state, reward, done, _ = env.step(action)
+            if car_racing_env:
+                next_aux_state = np.array([np.linalg.norm(env.car.hull.linearVelocity)])
             reward_episode += reward
             if running_state is not None:
                 next_state = running_state(next_state)
+            if next_aux_state is not None and aux_running_state is not None:
+                next_aux_state = aux_running_state(next_aux_state)
 
             if custom_reward is not None:
                 reward = custom_reward(state, action)
@@ -46,7 +87,10 @@ def collect_samples(pid, queue, env, policy, custom_reward,
 
             mask = 0 if done else 1
 
-            memory.push(state, action, mask, next_state, reward)
+            if aux_state is not None:
+                memory.push(state, action, mask, next_state, reward, aux_state, next_aux_state)
+            else:
+                memory.push(state, action, mask, next_state, reward)
 
             if render:
                 env.render()
@@ -54,6 +98,8 @@ def collect_samples(pid, queue, env, policy, custom_reward,
                 break
 
             state = next_state
+            if aux_state is not None:
+                aux_state = next_aux_state
 
         # log stats
         num_steps += (t + 1)
@@ -100,13 +146,15 @@ def merge_log(log_list):
 class Agent:
 
     def __init__(self, env, policy, device, custom_reward=None,
-                 mean_action=False, render=False, running_state=None, num_threads=1):
+                 mean_action=False, render=False, running_state=None, num_threads=1,
+                 aux_running_state=None):
         self.env = env
         self.policy = policy
         self.device = device
         self.custom_reward = custom_reward
         self.mean_action = mean_action
         self.running_state = running_state
+        self.aux_running_state = aux_running_state
         self.render = render
         self.num_threads = num_threads
 
@@ -119,13 +167,13 @@ class Agent:
 
         for i in range(self.num_threads-1):
             worker_args = (i+1, queue, self.env, self.policy, self.custom_reward, self.mean_action,
-                           False, self.running_state, thread_batch_size)
+                           False, self.running_state, thread_batch_size, self.aux_running_state)
             workers.append(multiprocessing.Process(target=collect_samples, args=worker_args))
         for worker in workers:
             worker.start()
 
         memory, log = collect_samples(0, None, self.env, self.policy, self.custom_reward, self.mean_action,
-                                      self.render, self.running_state, thread_batch_size)
+                                      self.render, self.running_state, thread_batch_size, self.aux_running_state)
 
         worker_logs = [None] * len(workers)
         worker_memories = [None] * len(workers)

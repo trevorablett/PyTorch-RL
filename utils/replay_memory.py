@@ -7,9 +7,12 @@ import random
 Transition = namedtuple('Transition', ('state', 'action', 'mask', 'next_state',
                                        'reward'))
 
+TransitionWithAux = namedtuple('TransitionWithAux', ('state', 'action', 'mask', 'next_state',
+                                       'reward', 'aux_state', 'aux_next_state'))
+
 
 class Memory(object):
-    def __init__(self):
+    def __init__(self, include_aux_state=False):
         self.memory = []
 
     def push(self, *args):

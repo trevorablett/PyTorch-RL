@@ -15,6 +15,7 @@ class StochPolicyBasic(nn.Module):
         action = torch.normal(action_mean, action_std)
         return action
 
+    # TODO this kl is useful for backproping through twice for TRPO, but not for general kl calculations
     def get_kl(self, x, aux_x=None):
         if aux_x is None:
             mean1, log_std1, std1 = self.forward(x)
