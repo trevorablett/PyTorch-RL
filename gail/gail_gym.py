@@ -139,9 +139,38 @@ optim_batch_size = 64
 # load trajectory
 if is_img_state:
     expert_data = pickle.load(open(args.expert_traj_path, "rb"))
+
+    # TODO remove these 3 lines... for now, just copying dict keys to generic names that will be used for new datasets
+    expert_data['states'] = expert_data['obs']
+    expert_data['actions'] = expert_data['act']
+    expert_data['aux'] = expert_data['vel']
+
+    if num_aux > 0:
+        aux_running_state.rs._M = np.atleast_1d(expert_data['aux'].mean())
+        aux_running_state.rs._n = np.atleast_1d(expert_data['aux'].shape[0])
+        # see https://www.johndcook.com/blog/standard_deviation/ for calc below
+        aux_running_state.rs._S = expert_data['aux'].var() * (aux_running_state.rs.n - 1)
+        expert_data['aux'] = aux_running_state(expert_data['aux'], update=False)
+
+    # convert all expert data to torch tensors
+    # for loop might be slow, should be parallelized with dataloader or just multiprocessing
+    transformed_imgs = []
+    for i in range(expert_data['states'].shape[0]):
+        transformed_imgs.append(img_t(expert_data['states'][i]))
+        if i % 1000 == 0:
+            print("Transforming expert img %d of %d..." % (i, expert_data['states'].shape[0]))
+    expert_data['states'] = torch.stack(transformed_imgs).to(dtype).to(device)
+    expert_data['actions'] = torch.tensor(expert_data['actions']).to(dtype).to(device)
+    if num_aux > 0:
+        expert_data['aux'] = torch.tensor(expert_data['aux']).to(dtype).to(device)
+        if num_aux == 1:
+            expert_data['aux'] = expert_data['aux'].unsqueeze(1)
+
     running_state = None
+    num_expert_data = expert_data['states'].shape[0]
 else:
     expert_traj, running_state = pickle.load(open(args.expert_traj_path, "rb"))
+    num_expert_data = expert_traj.shape[0]
 # expert_data = pickle.load(open(args.expert_traj_path, "rb"))
 
 # running_state is normally just a z-filter for updating means and std as well as normalization,
@@ -196,18 +225,18 @@ def update_params(batch, i_iter):
     """get advantage estimation from the trajectories"""
     advantages, returns = estimate_advantages(rewards, masks, values, args.gamma, args.tau, device)
 
-    # TODO CONTINUE FROM HERE
-    import ipdb;
-    ipdb.set_trace()
-
     """update discriminator"""
     for _ in range(1):
-        expert_state_actions = torch.from_numpy(expert_traj).to(dtype).to(device)
-        g_o = discrim_net(torch.cat([states, actions], 1))
-        e_o = discrim_net(expert_state_actions)
+        if is_img_state:
+            g_o = discrim_net(states, actions, aux_states)
+            e_o = discrim_net(expert_data['states'], expert_data['actions'], expert_data['aux'])
+        else:
+            expert_state_actions = torch.from_numpy(expert_traj).to(dtype).to(device)
+            g_o = discrim_net(torch.cat([states, actions], 1))
+            e_o = discrim_net(expert_state_actions)
         optimizer_discrim.zero_grad()
         discrim_loss = discrim_criterion(g_o, ones((states.shape[0], 1), device=device)) + \
-            discrim_criterion(e_o, zeros((expert_traj.shape[0], 1), device=device))
+            discrim_criterion(e_o, zeros((num_expert_data, 1), device=device))
         discrim_loss.backward()
         optimizer_discrim.step()
 
@@ -228,6 +257,10 @@ def update_params(batch, i_iter):
 
             ppo_step(policy_net, value_net, optimizer_policy, optimizer_value, 1, states_b, actions_b, returns_b,
                      advantages_b, fixed_log_probs_b, args.clip_epsilon, args.l2_reg)
+
+            # TODO CONTINUE FROM HERE, NEED TO FIX PPO STEP
+            import ipdb;
+            ipdb.set_trace()
 
 
 def main_loop():
