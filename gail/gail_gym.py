@@ -19,6 +19,7 @@ from torchvision import transforms
 from core.ppo import ppo_step
 from core.common import estimate_advantages
 from core.agent import Agent
+from models.cnn_common import img_transform, imgnet_means, imgnet_stds
 
 
 parser = argparse.ArgumentParser(description='PyTorch GAIL example')
@@ -68,6 +69,8 @@ cnn_options = dict(
     strides = [4, 2, 1],
     head_hidden_sizes = [512]
 )
+
+img_t = img_transform(imgnet_means, imgnet_stds)
 
 """environment"""
 env = gym.make(args.env_name)
@@ -144,19 +147,27 @@ else:
 # running_state is normally just a z-filter for updating means and std as well as normalization,
 # as an alternative, just normalize states before passing through models
 
-
-import ipdb; ipdb.set_trace()
 # TODO next step: ensure that data from expert trajs matches what the expert traj here looks like,
 # or figure out a way to make it work nicely
 
-# TODO need to add in aux to discrim and value forward passes (including in expert_reward function)
+# TODO need to add in aux to discrim and value forward passes
 
 # TODO need to add in option for pretraining / BC
 
-def expert_reward(state, action):
-    state_action = tensor(np.hstack([state, action]), dtype=dtype)
-    with torch.no_grad():
-        return -math.log(discrim_net(state_action)[0].item())
+def expert_reward(state, action, aux_state=None):
+    is_img_state = len(env.observation_space.shape) == 3  # shadows outer scope var in case this func is moved
+    if is_img_state:
+        state_var = img_t(state).unsqueeze(0)
+        if aux_state is not None:
+            aux_state_var = tensor(aux_state, dtype=dtype).unsqueeze(0)
+        else:
+            aux_state_var = None
+        action_var = tensor(action, dtype=dtype).unsqueeze(0)
+        return -math.log(discrim_net(state_var, action_var, aux_state_var))
+    else:
+        state_action = tensor(np.hstack([state, action]), dtype=dtype)
+        with torch.no_grad():
+            return -math.log(discrim_net(state_action)[0].item())
 
 
 """create agent"""
@@ -170,12 +181,24 @@ def update_params(batch, i_iter):
     actions = torch.from_numpy(np.stack(batch.action)).to(dtype).to(device)
     rewards = torch.from_numpy(np.stack(batch.reward)).to(dtype).to(device)
     masks = torch.from_numpy(np.stack(batch.mask)).to(dtype).to(device)
+    if type(batch).__name__ == 'TransitionWithAux':
+        aux_states = torch.from_numpy(np.stack(batch.aux_state)).to(dtype).to(device)
+    else:
+        aux_states = None
     with torch.no_grad():
-        values = value_net(states)
-        fixed_log_probs = policy_net.get_log_prob(states, actions)
+        if aux_states is not None:
+            values = value_net(states, aux_states)
+            fixed_log_probs = policy_net.get_log_prob(states, actions, aux_states)  # sums log probs for all actions
+        else:
+            values = value_net(states)
+            fixed_log_probs = policy_net.get_log_prob(states, actions)
 
     """get advantage estimation from the trajectories"""
     advantages, returns = estimate_advantages(rewards, masks, values, args.gamma, args.tau, device)
+
+    # TODO CONTINUE FROM HERE
+    import ipdb;
+    ipdb.set_trace()
 
     """update discriminator"""
     for _ in range(1):
@@ -213,8 +236,6 @@ def main_loop():
         discrim_net.to(torch.device('cpu'))
         batch, log = agent.collect_samples(args.min_batch_size)
         discrim_net.to(device)
-
-        import ipdb; ipdb.set_trace()
 
         t0 = time.time()
         update_params(batch, i_iter)

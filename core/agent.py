@@ -2,23 +2,15 @@ import multiprocessing
 
 from torchvision import transforms
 
+
 from utils.replay_memory import Memory
 from utils.torch import *
+from models.cnn_common import img_transform, imgnet_means, imgnet_stds
 import math
 import time
 
 
 dtype = torch.float32
-
-# means and stds from imagenet
-img_means = [0.485, 0.456, 0.406]
-img_stds = [0.229, 0.224, 0.225]
-
-img_transform = transforms.Compose((
-    transforms.ToPILImage(),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=img_means, std=img_stds)
-))
 
 def collect_samples(pid, queue, env, policy, custom_reward,
                     mean_action, render, running_state, min_batch_size, aux_running_state):
@@ -39,6 +31,8 @@ def collect_samples(pid, queue, env, policy, custom_reward,
     is_img_state = len(env.observation_space.shape) == 3
     if car_racing_env:
         memory = Memory(include_aux_state=True)
+    if is_img_state:
+        img_t = img_transform(imgnet_means, imgnet_stds)
 
     while num_steps < min_batch_size:
         state = env.reset()
@@ -52,7 +46,7 @@ def collect_samples(pid, queue, env, policy, custom_reward,
 
         for t in range(10000):
             if is_img_state:
-                state_var = img_transform(state).unsqueeze(0)
+                state_var = img_t(state).unsqueeze(0)
             else:
                 state_var = tensor(state).unsqueeze(0)
             if aux_state is not None:
@@ -80,21 +74,34 @@ def collect_samples(pid, queue, env, policy, custom_reward,
                 next_aux_state = aux_running_state(next_aux_state)
 
             if custom_reward is not None:
-                reward = custom_reward(state, action)
-                total_c_reward += reward
-                min_c_reward = min(min_c_reward, reward)
-                max_c_reward = max(max_c_reward, reward)
+                if is_img_state:
+                    reward = custom_reward(state, action, aux_state)
+                else:
+                    reward = custom_reward(state, action)
+                    total_c_reward += reward
+                    min_c_reward = min(min_c_reward, reward)
+                    max_c_reward = max(max_c_reward, reward)
 
             mask = 0 if done else 1
 
-            if aux_state is not None:
-                memory.push(state, action, mask, next_state, reward, aux_state, next_aux_state)
+            if is_img_state:
+                mem_state = state_var.squeeze().numpy()
+                mem_next_state = img_t(next_state).numpy()
             else:
-                memory.push(state, action, mask, next_state, reward)
+                mem_state = state
+                mem_next_state = next_state
+            if aux_state is not None:
+                memory.push(mem_state, action, mask, mem_next_state, reward, aux_state, next_aux_state)
+            else:
+                memory.push(mem_state, action, mask, mem_next_state, reward)
 
             if render:
                 env.render()
             if done:
+                break
+
+            # temp for testing in car env
+            if t > 100:
                 break
 
             state = next_state

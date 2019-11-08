@@ -1,9 +1,23 @@
 import torch.nn as nn
 import torch
+from torchvision import transforms
+
 from utils.math import *
 from models.mlp_policy import Policy
 
 # borrows some ideas from https://github.com/astooke/rlpyt/blob/master/rlpyt/models/conv2d.py
+
+
+# means and stds from imagenet
+imgnet_means = [0.485, 0.456, 0.406]
+imgnet_stds = [0.229, 0.224, 0.225]
+
+def img_transform(img_means, img_stds):
+    return transforms.Compose((
+        transforms.ToPILImage(),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=img_means, std=img_stds)
+    ))
 
 
 def conv2d_output_shape(h, w, kernel_size=1, stride=1, padding=0, dilation=1):
