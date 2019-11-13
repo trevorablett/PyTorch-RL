@@ -54,6 +54,8 @@ parser.add_argument('--log-interval', type=int, default=1, metavar='N',
 parser.add_argument('--save-model-interval', type=int, default=0, metavar='N',
                     help="interval between saving model (default: 0, means don't save)")
 parser.add_argument('--gpu-index', type=int, default=0, metavar='N')
+parser.add_argument('--pre-train', action='store_true', default=False,
+                    help='pre-train the policy using behavioral cloning')
 args = parser.parse_args()
 
 dtype = torch.float32
@@ -179,9 +181,35 @@ else:
 # TODO next step: ensure that data from expert trajs matches what the expert traj here looks like,
 # or figure out a way to make it work nicely
 
-# TODO need to add in aux to discrim and value forward passes
-
 # TODO need to add in option for pretraining / BC
+
+# TODO multiprocessing doesn't work properly for carracing (fails after one iteration)
+
+
+"""optional pretraining"""
+if args.pre_train:
+    # params could be user set, but basic params should be fine for most cases
+    max_pt_epochs = 500
+    max_pt_epochs_wo_best = 30
+    pt_lr = 1e-3
+    # could also be done with log-likelihood, see
+    # https://github.com/aravindr93/mjrl/blob/master/mjrl/algos/behavior_cloning.py
+    pt_criterion = nn.MSELoss()
+
+    # todo ensure that the std output from the policy net is still reasonable after
+
+    perm = np.arange(num_expert_data)
+    np.random.shuffle(perm)
+    perm = LongTensor(perm).to(device)
+    valid_perm = perm[:math.floor(.2 * num_expert_data)]
+    train_perm = perm[math.floor(.2 * num_expert_data):]
+    lowest_valid_loss = 1e10
+    epochs_wo_best = 0
+    # for i in range()
+
+    if is_img_state:
+        valid_perm = expert_data['states']num_expert_data * .2
+
 
 def expert_reward(state, action, aux_state=None):
     is_img_state = len(env.observation_space.shape) == 3  # shadows outer scope var in case this func is moved
@@ -249,18 +277,20 @@ def update_params(batch, i_iter):
 
         states, actions, returns, advantages, fixed_log_probs = \
             states[perm].clone(), actions[perm].clone(), returns[perm].clone(), advantages[perm].clone(), fixed_log_probs[perm].clone()
+        if aux_states is not None:
+            aux_states = aux_states[perm].clone()
 
         for i in range(optim_iter_num):
             ind = slice(i * optim_batch_size, min((i + 1) * optim_batch_size, states.shape[0]))
             states_b, actions_b, advantages_b, returns_b, fixed_log_probs_b = \
                 states[ind], actions[ind], advantages[ind], returns[ind], fixed_log_probs[ind]
+            if aux_states is not None:
+                aux_states_b = aux_states[ind]
+            else:
+                aux_states_b = None
 
             ppo_step(policy_net, value_net, optimizer_policy, optimizer_value, 1, states_b, actions_b, returns_b,
-                     advantages_b, fixed_log_probs_b, args.clip_epsilon, args.l2_reg)
-
-            # TODO CONTINUE FROM HERE, NEED TO FIX PPO STEP
-            import ipdb;
-            ipdb.set_trace()
+                     advantages_b, fixed_log_probs_b, args.clip_epsilon, args.l2_reg, aux_states_b)
 
 
 def main_loop():

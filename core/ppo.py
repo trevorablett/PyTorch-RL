@@ -2,11 +2,14 @@ import torch
 
 
 def ppo_step(policy_net, value_net, optimizer_policy, optimizer_value, optim_value_iternum, states, actions,
-             returns, advantages, fixed_log_probs, clip_epsilon, l2_reg):
+             returns, advantages, fixed_log_probs, clip_epsilon, l2_reg, aux_states=None):
 
     """update critic"""
     for _ in range(optim_value_iternum):
-        values_pred = value_net(states)
+        if aux_states is not None:
+            values_pred = value_net(states, aux_states)
+        else:
+            values_pred = value_net(states)
         value_loss = (values_pred - returns).pow(2).mean()
         # weight decay
         for param in value_net.parameters():
@@ -16,7 +19,10 @@ def ppo_step(policy_net, value_net, optimizer_policy, optimizer_value, optim_val
         optimizer_value.step()
 
     """update policy"""
-    log_probs = policy_net.get_log_prob(states, actions)
+    if aux_states is not None:
+        log_probs = policy_net.get_log_prob(states, actions, aux_states)
+    else:
+        log_probs = policy_net.get_log_prob(states, actions)
     ratio = torch.exp(log_probs - fixed_log_probs)
     surr1 = ratio * advantages
     surr2 = torch.clamp(ratio, 1.0 - clip_epsilon, 1.0 + clip_epsilon) * advantages

@@ -100,16 +100,13 @@ def collect_samples(pid, queue, env, policy, custom_reward,
             if done:
                 break
 
-            # temp for testing in car env
-            if t > 100:
-                break
-
             state = next_state
             if aux_state is not None:
                 aux_state = next_aux_state
 
         # log stats
         num_steps += (t + 1)
+
         num_episodes += 1
         total_reward += reward_episode
         min_reward = min(min_reward, reward_episode)
