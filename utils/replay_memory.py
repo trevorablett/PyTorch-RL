@@ -7,17 +7,13 @@ import random
 Transition = namedtuple('Transition', ('state', 'action', 'mask', 'next_state',
                                        'reward'))
 
-TransitionWithAux = namedtuple('TransitionWithAux', ('state', 'action', 'mask', 'next_state',
-                                       'reward', 'aux_state', 'aux_next_state'))
-
 
 class Memory(object):
-    def __init__(self, include_aux_state=False):
+    def __init__(self, extra_fields=()):
         self.memory = []
-        if include_aux_state:
-            self.trans_tuple = TransitionWithAux
-        else:
-            self.trans_tuple = Transition
+        fields = ['state', 'action', 'mask', 'next_state', 'reward']
+        fields.extend(extra_fields)
+        self.trans_tuple = namedtuple('Transition', tuple(fields))
 
     def push(self, *args):
         """Saves a transition."""

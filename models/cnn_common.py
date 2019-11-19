@@ -35,7 +35,7 @@ def conv2d_output_shape(h, w, kernel_size=1, stride=1, padding=0, dilation=1):
 
 class CNNBasic(nn.Module):
     def __init__(self, state_dim, action_dim, channels, kernel_sizes, strides, paddings=None,
-                 activation='relu', use_maxpool=False, num_aux=0):
+                 activation='relu', use_maxpool=False, num_aux=0, resnet_first_layer=False):
         super().__init__()
         if paddings is None:
             paddings = [0 for _ in range(len(channels))]
@@ -79,6 +79,11 @@ class CNNBasic(nn.Module):
         self.head = nn.Linear(self.conv_out_size_for_fc + num_aux, action_dim)
         self.num_aux = num_aux
 
+        # initialize first cnn layer using resnet101 weights,
+        # first layer must be nn.Conv2d(3, 64, kernel_size=7, stride=4)
+        if resnet_first_layer:
+            self.conv[0].apply(self.prior_init)
+
     def forward(self, img, aux_states=None):
         conv_out = self.conv(img).view(img.shape[0], -1)
         if aux_states is None:
@@ -100,3 +105,12 @@ class CNNBasic(nn.Module):
             except AttributeError:
                 pass  # Not a conv layer.
         return h * w * c
+
+    def prior_init(self, m):
+        if type(m) == nn.Conv2d:
+            # initialize the first rgb layer using googlenet or similar
+            import os, pickle
+            full_path = os.path.dirname(os.path.realpath(__file__))
+            with open(full_path + '/../assets/cafferesnet_layer1_weights.pkl', 'rb') as file:
+                layer1_weights = pickle.load(file)
+            m.weight.data = layer1_weights

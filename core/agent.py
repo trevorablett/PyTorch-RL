@@ -1,22 +1,47 @@
 import multiprocessing
-
-from torchvision import transforms
-
-
 from utils.replay_memory import Memory
 from utils.torch import *
 from models.cnn_common import img_transform, imgnet_means, imgnet_stds
 import math
 import time
 
+from manipulator_learning.sim.utils.gamepad_control import GamepadSteer
+
 
 dtype = torch.float32
 
+
+class Intervener():
+    def __init__(self, device_type, env_id):
+        self.device_type = device_type
+        self.env_id = env_id
+        if env_id == 'CarRacing-v0':
+            self.step_delay = .03
+        if device_type == 'gamepad':
+            self.device = GamepadSteer()
+
+    def update(self):
+        if self.device_type == 'gamepad':
+            self.device.process_events()
+
+    def get_action(self):
+        self.update()
+        if self.env_id == 'CarRacing-v0':
+            if self.device_type == 'gamepad':
+                steer = self.device.normalized_btn_state['LX']
+                throttle = self.device.normalized_btn_state['RT']
+                brake = self.device.normalized_btn_state['LT']
+                if brake > .5:
+                    brake = .5
+                return np.array([steer, throttle, brake])
+
+
 def collect_samples(pid, queue, env, policy, custom_reward,
-                    mean_action, render, running_state, min_batch_size, aux_running_state):
+                    mean_action, render, running_state, min_batch_size, aux_running_state,
+                    intervention_device=None):
     torch.randn(pid)
     log = dict()
-    memory = Memory()
+    extra_mem_fields = []
     num_steps = 0
     total_reward = 0
     min_reward = 1e6
@@ -27,12 +52,17 @@ def collect_samples(pid, queue, env, policy, custom_reward,
     num_episodes = 0
     aux_state = None
     next_aux_state = None
-    car_racing_env = 'CarRacing' in str(env)
+    car_racing_env = env.spec.id == 'CarRacing-v0'
     is_img_state = len(env.observation_space.shape) == 3
     if car_racing_env:
-        memory = Memory(include_aux_state=True)
+        extra_mem_fields.extend(['aux_state', 'aux_next_state'])
     if is_img_state:
         img_t = img_transform(imgnet_means, imgnet_stds)
+    if intervention_device is not None:
+        intervener = Intervener(intervention_device, env.spec.id)
+        extra_mem_fields.append('expert_mask')
+
+    memory = Memory(extra_mem_fields)
 
     while num_steps < min_batch_size:
         state = env.reset()
@@ -63,6 +93,16 @@ def collect_samples(pid, queue, env, policy, custom_reward,
                         action = policy.select_action(state_var, aux_state_var)[0].numpy()
                     else:
                         action = policy.select_action(state_var)[0].numpy()
+
+            if intervention_device is not None:
+                intervene_action = intervener.get_action()
+                if np.any(intervene_action):
+                    action = intervene_action
+                    expert_action = 1
+                else:
+                    expert_action = 0
+                time.sleep(intervener.step_delay)
+
             action = int(action) if policy.is_disc_action else action.astype(np.float64)
             next_state, reward, done, _ = env.step(action)
             if car_racing_env:
@@ -82,6 +122,10 @@ def collect_samples(pid, queue, env, policy, custom_reward,
                     min_c_reward = min(min_c_reward, reward)
                     max_c_reward = max(max_c_reward, reward)
 
+            # TODO remove this, temporary for faster testing
+            if t > 200:
+                done = True
+
             mask = 0 if done else 1
 
             if is_img_state:
@@ -90,10 +134,13 @@ def collect_samples(pid, queue, env, policy, custom_reward,
             else:
                 mem_state = state
                 mem_next_state = next_state
+
+            mem_list = [mem_state, action, mask, mem_next_state, reward]
             if aux_state is not None:
-                memory.push(mem_state, action, mask, mem_next_state, reward, aux_state, next_aux_state)
-            else:
-                memory.push(mem_state, action, mask, mem_next_state, reward)
+                mem_list.extend([aux_state, next_aux_state])
+            if intervention_device is not None:
+                mem_list.append(expert_action)
+            memory.push(*mem_list)
 
             if render:
                 env.render()
@@ -151,7 +198,7 @@ class Agent:
 
     def __init__(self, env, policy, device, custom_reward=None,
                  mean_action=False, render=False, running_state=None, num_threads=1,
-                 aux_running_state=None):
+                 aux_running_state=None, intervention_device=None):
         self.env = env
         self.policy = policy
         self.device = device
@@ -161,6 +208,7 @@ class Agent:
         self.aux_running_state = aux_running_state
         self.render = render
         self.num_threads = num_threads
+        self.intervention_device = intervention_device
 
     def collect_samples(self, min_batch_size):
         t_start = time.time()
@@ -177,7 +225,8 @@ class Agent:
             worker.start()
 
         memory, log = collect_samples(0, None, self.env, self.policy, self.custom_reward, self.mean_action,
-                                      self.render, self.running_state, thread_batch_size, self.aux_running_state)
+                                      self.render, self.running_state, thread_batch_size, self.aux_running_state,
+                                      self.intervention_device)
 
         worker_logs = [None] * len(workers)
         worker_memories = [None] * len(workers)

@@ -2,16 +2,25 @@ import torch
 from utils import to_device
 
 
-def estimate_advantages(rewards, masks, values, gamma, tau, device):
+def estimate_advantages(rewards, masks, values, gamma, tau, device, terminal_ns_values=None):
     rewards, masks, values = to_device(torch.device('cpu'), rewards, masks, values)
+    if terminal_ns_values is not None:
+        terminal_ns_values = to_device(torch.device('cpu'), terminal_ns_values)
+        current_tns_value_i = -1  # start from last
     tensor_type = type(rewards)
     deltas = tensor_type(rewards.size(0), 1)
     advantages = tensor_type(rewards.size(0), 1)
 
     prev_value = 0
     prev_advantage = 0
+
     for i in reversed(range(rewards.size(0))):
-        deltas[i] = rewards[i] + gamma * prev_value * masks[i] - values[i]
+        if terminal_ns_values is not None and masks[i] == 0:
+            # indicates caclulating for final state
+            deltas[i] = rewards[i] + gamma * terminal_ns_values[current_tns_value_i] - values[i]
+            current_tns_value_i -= 1
+        else:
+            deltas[i] = rewards[i] + gamma * prev_value * masks[i] - values[i]
         advantages[i] = deltas[i] + gamma * tau * prev_advantage * masks[i]
 
         prev_value = values[i, 0]
@@ -19,6 +28,5 @@ def estimate_advantages(rewards, masks, values, gamma, tau, device):
 
     returns = values + advantages
     advantages = (advantages - advantages.mean()) / advantages.std()
-
     advantages, returns = to_device(device, advantages, returns)
     return advantages, returns

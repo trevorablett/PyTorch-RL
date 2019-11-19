@@ -26,7 +26,21 @@ class StochPolicyBasic(nn.Module):
         log_std0 = log_std1.detach()
         std0 = std1.detach()
         kl = log_std1 - log_std0 + (std0.pow(2) + (mean0 - mean1).pow(2)) / (2.0 * std1.pow(2)) - 0.5
+
         return kl.sum(1, keepdim=True)
+
+    def get_kl_comp(self, x, aux_x, other):
+        with torch.no_grad():
+            if aux_x is None:
+                mean1, log_std1, std1 = other.forward(x)
+                mean0, log_std0, std0 = self.forward(x)
+            else:
+                mean1, log_std1, std1 = other.forward(x, aux_x)
+                mean0, log_std0, std0 = self.forward(x, aux_x)
+
+        kl = log_std1 - log_std0 + (std0.pow(2) + (mean1 - mean0).pow(2)) / (2. * std1.pow(2)) - .5
+
+        return kl.sum(dim=1)
 
     def get_log_prob(self, x, actions, aux_x=None):
         if aux_x is None:
