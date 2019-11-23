@@ -24,6 +24,9 @@ from core.agent import Agent
 from models.cnn_common import img_transform, imgnet_means, imgnet_stds
 
 
+# python gail_gym.py --env-name CarRacing-v0 --expert-traj-path ../../corrective-interaction/expert_data/CarRacingNoVelCap/5_rollouts.pkl --render --log-std -1.0 --num-threads 1 --min-batch-size 100 --pre-train --cnn-resnet-first-layer --peb --first-ppo-iter 1 --intervention-device gamepad
+# python gail_gym.py --env-name CarRacing-v0 --expert-traj-path ../../corrective-interaction/expert_data/CarRacingNoVelCap/5_rollouts.pkl --render --log-std -3.0 --num-threads 1 --min-batch-size 100 --pre-train --cnn-resnet-first-layer --first-ppo-iter 1 --pol-learning-rate 3e-5 --intervention-device gamepad
+
 parser = argparse.ArgumentParser(description='PyTorch GAIL example')
 parser.add_argument('--env-name', default="Hopper-v2", metavar='G',
                     help='name of the environment to run')
@@ -40,7 +43,9 @@ parser.add_argument('--tau', type=float, default=0.95, metavar='G',
 parser.add_argument('--l2-reg', type=float, default=1e-3, metavar='G',
                     help='l2 regularization regression (default: 1e-3)')
 parser.add_argument('--learning-rate', type=float, default=3e-4, metavar='G',
-                    help='gae (default: 3e-4)')
+                    help='learning rate (default: 3e-4)')
+parser.add_argument('--pol-learning-rate', type=float, default=3e-4, metavar='G',
+                    help='policy learning rate (default: 3e-4)')
 parser.add_argument('--clip-epsilon', type=float, default=0.2, metavar='N',
                     help='clipping epsilon for PPO')
 parser.add_argument('--num-threads', type=int, default=4, metavar='N',
@@ -144,7 +149,7 @@ else:
 discrim_criterion = nn.BCELoss()
 to_device(device, policy_net, value_net, discrim_net, discrim_criterion)
 
-optimizer_policy = torch.optim.Adam(policy_net.parameters(), lr=args.learning_rate)
+optimizer_policy = torch.optim.Adam(policy_net.parameters(), lr=args.pol_learning_rate)
 optimizer_value = torch.optim.Adam(value_net.parameters(), lr=args.learning_rate)
 optimizer_discrim = torch.optim.Adam(discrim_net.parameters(), lr=args.learning_rate)
 
@@ -187,13 +192,11 @@ if is_img_state:
 else:
     expert_traj, running_state = pickle.load(open(args.expert_traj_path, "rb"))
     num_expert_data = expert_traj.shape[0]
+    expert_data = {}  # todo add expert data dict for non image envs
 # expert_data = pickle.load(open(args.expert_traj_path, "rb"))
 
-# running_state is normally just a z-filter for updating means and std as well as normalization,
-# as an alternative, just normalize states before passing through models
-
-# TODO next step: ensure that data from expert trajs matches what the expert traj here looks like,
-# or figure out a way to make it work nicely
+if args.intervention_device is not None:
+    expert_data['labels'] = torch.zeros((num_expert_data, 1), device=device).to(dtype)
 
 # TODO multiprocessing doesn't work properly for carracing (fails after one iteration)
 
@@ -319,6 +322,12 @@ def update_params(batch, i_iter):
             aux_next_states = torch.from_numpy(np.stack(batch.aux_next_state)).to(dtype).to(device)
     else:
         aux_states = None
+    if hasattr(batch, 'expert_mask'):
+        expert_masks_np = np.array(batch.expert_mask)
+        expert_masks = torch.from_numpy(np.stack(batch.expert_mask)).to(dtype).to(device)
+    else:
+        expert_masks_np = None
+        expert_masks = None
     with torch.no_grad():
         if aux_states is not None:
             values = value_net(states, aux_states)
@@ -340,14 +349,64 @@ def update_params(batch, i_iter):
     else:
         terminal_ns_values = None
 
+    """modify buffers if expert intervention occurred"""
+    if np.any(expert_masks_np):
+        # states & actions marked with a 1 are new expert data
+        expert_data['states'] = torch.cat((expert_data['states'], states))
+        expert_data['actions'] = torch.cat((expert_data['actions'], actions))
+
+        # masks need to be last autonomous state before every correction
+        masks = masks.fill_(1)
+
+        new_e_labels = torch.zeros(states.shape[0])
+        next_non_e_ind = np.argmax(1. - expert_masks_np)
+        next_e_ind = np.argmax(expert_masks_np)
+        last_loop = False
+        while True:
+            if next_non_e_ind < next_e_ind:
+                first_label = 1 / (next_e_ind - next_non_e_ind)
+                new_e_labels[next_non_e_ind:next_e_ind] = torch.linspace(
+                    float(first_label), 1., int(next_e_ind - next_non_e_ind))
+                masks[next_e_ind - 1] = 0
+                if last_loop:
+                    break
+                next_non_e_ind = np.argmax((1. - expert_masks_np)[next_e_ind:]) + next_e_ind
+                if not np.any((1 - expert_masks_np)[next_e_ind:]):
+                    next_non_e_ind = expert_masks_np.shape[0]
+                    break
+            else:
+                # new_e_labels[next_e_ind:next_non_e_ind] = torch.zeros(next_non_e_ind - next_e_ind)
+                if last_loop:
+                    break
+                next_e_ind = np.argmax(expert_masks_np[next_non_e_ind:]) + next_non_e_ind
+                if not np.any(expert_masks_np[next_non_e_ind:]):
+                    next_e_ind = expert_masks_np.shape[0]
+                    last_loop = True
+
+            # TODO consider adding new reward values for the ppo update with a similar scheme as the new
+            # discriminator labels, but it would have to be -math.log(new label), and they would have to be
+            # somehow comparable in scale to what the rewards already being output were
+            # (to not mess up value estimator)
+
+        expert_data['labels'] = torch.cat((expert_data['labels'],
+                                           new_e_labels.unsqueeze(1).to(dtype).to(device)))
+
+        new_expert_states = states[expert_masks_np.nonzero()]
+        states = states[(1 - expert_masks_np).nonzero()]
+        if aux_states is not None:
+            new_expert_aux_states = aux_states[expert_masks_np.nonzero()]
+            aux_states = aux_states[(1 - expert_masks_np).nonzero()]
+        else:
+            new_expert_aux_states = None
+        new_expert_actions = actions[expert_masks_np.nonzero()]
+        actions = actions[(1- expert_masks_np).nonzero()]
+
     """get advantage estimation from the trajectories"""
     advantages, returns = estimate_advantages(rewards, masks, values, args.gamma, args.tau, device,
                                               terminal_ns_values)
 
-    import ipdb; ipdb.set_trace()
-
     """update discriminator"""
-    for _ in range(1):
+    for _ in range(10):
         if is_img_state:
             g_o = discrim_net(states, actions, aux_states)
             e_o = discrim_net(expert_data['states'], expert_data['actions'], expert_data['aux'])
@@ -356,45 +415,14 @@ def update_params(batch, i_iter):
             g_o = discrim_net(torch.cat([states, actions], 1))
             e_o = discrim_net(expert_state_actions)
         optimizer_discrim.zero_grad()
-        discrim_loss = discrim_criterion(g_o, ones((states.shape[0], 1), device=device)) + \
+        if args.intervention_device is not None:
+            discrim_loss = discrim_criterion(g_o, ones((states.shape[0], 1), device=device)) + \
+                discrim_criterion(e_o, expert_data['labels'])
+        else:
+            discrim_loss = discrim_criterion(g_o, ones((states.shape[0], 1), device=device)) + \
             discrim_criterion(e_o, zeros((num_expert_data, 1), device=device))
         discrim_loss.backward()
         optimizer_discrim.step()
-
-    # for ref: discrim net means on hopper after single iteration: .4998 for expert, .5072 for non-expert
-    # TODO problem right now is that the policy net is somehow outputting values like this as actions,
-    # but the actions should be all between 0 and 1
-    # [10.1507, 1.6667, -1.4840],
-    # [9.3812, 1.2613, -1.3743],
-    # [9.0868, 0.9743, -1.4049],
-    # [9.2784, 0.9639, -1.4516],
-    # [9.6953, 1.1377, -1.4668],
-    # [9.7768, 1.1617, -1.3803],
-    # [9.0803, 1.0555, -1.2883],
-    # [9.0783, 0.7933, -1.1709],
-    # [9.8860, 0.9934, -1.1818],
-    # [9.9298, 1.1547, -1.1968],
-    # [9.5694, 1.2296, -1.2355],
-    # [9.7919, 1.3058, -1.3420],
-    # [10.4802, 1.1579, -1.3707],
-    # [10.9195, 1.1548, -1.7974],
-    # [10.9771, 0.9116, -2.1859],
-    # [11.0745, 0.5051, -2.3044],
-    # [11.6927, 0.1223, -2.2099],
-    # [12.0009, 0.2443, -2.3380],
-    # [12.3350, 1.0799, -2.3430],
-    # [11.8844, 1.5251, -2.2456]],
-    # also, right now the first ppo step works okay for some reason, but the second one breaks everything
-    # another problem: ends of trajectories automatically get very low advantage (since they are treated the
-    # same as a failure)
-    # TODO two problems: 1) policy changes dramatically after first round and outputs poor actions
-    # todo 2) end of trajectories is always having significantly lower return than the rest
-    #
-    # Possible solutions:
-    # 1) add a way of checking kl divergence between current policy and original policy, and once it's changed
-    #    by a certain amount, stop doing ppo steps (even if an epoch isn't finished)
-    # 2) Do an initial env rollout for exclusively training the discriminator before running ppo
-    
 
     """if removing episode-termination bias, remove last set of states before terminal"""
     # if args.peb and i_iter <= args.first_ppo_iter:
@@ -442,6 +470,9 @@ def update_params(batch, i_iter):
             if aux_states is not None:
                 aux_states = aux_states[perm].clone()
 
+            # TODO also need to divide new expert data into minibatches AND ensure that whichever
+            # of expert vs non expert is bigger will control the number of minibatches
+
             for i in range(optim_iter_num):
                 ind = slice(i * optim_batch_size, min((i + 1) * optim_batch_size, states.shape[0]))
                 states_b, actions_b, advantages_b, returns_b, fixed_log_probs_b = \
@@ -459,7 +490,8 @@ def update_params(batch, i_iter):
                 if kl.mean() > .05:
                     break
 
-        # import ipdb; ipdb.set_trace()  # check the value net estimates for final states to make sure no bias
+            if kl.mean() > .05:
+                break
 
 
 def main_loop():

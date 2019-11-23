@@ -99,9 +99,10 @@ def collect_samples(pid, queue, env, policy, custom_reward,
                 if np.any(intervene_action):
                     action = intervene_action
                     expert_action = 1
+                    time.sleep(intervener.step_delay)
                 else:
                     expert_action = 0
-                time.sleep(intervener.step_delay)
+                # time.sleep(intervener.step_delay)
 
             action = int(action) if policy.is_disc_action else action.astype(np.float64)
             next_state, reward, done, _ = env.step(action)
@@ -123,7 +124,7 @@ def collect_samples(pid, queue, env, policy, custom_reward,
                     max_c_reward = max(max_c_reward, reward)
 
             # TODO remove this, temporary for faster testing
-            if t > 200:
+            if t > 100:
                 done = True
 
             mask = 0 if done else 1
@@ -167,7 +168,7 @@ def collect_samples(pid, queue, env, policy, custom_reward,
     log['min_reward'] = min_reward
     if custom_reward is not None:
         log['total_c_reward'] = total_c_reward
-        log['avg_c_reward'] = total_c_reward / num_steps
+        log['avg_c_reward'] = total_c_reward / num_episodes
         log['max_c_reward'] = max_c_reward
         log['min_c_reward'] = min_c_reward
 
